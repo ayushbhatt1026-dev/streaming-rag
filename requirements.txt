@@ -1,0 +1,12 @@
+# Production stack (decision log, Step 2)
+qdrant-client>=1.9         # vector store, embedded local mode — no Docker required
+sentence-transformers>=3.0 # BGE-small-en-v1.5 embeddings
+numpy>=1.26
+
+# Offline dev fallback only (already covers scikit-learn's TfidfVectorizer)
+scikit-learn>=1.4
+
+# Add as you build the other modules:
+# fastapi, uvicorn, websockets   (M1 streaming server)
+# pydantic>=2                    (contracts.py, once you move off dataclasses)
+# pytest                         (eval harness, Phase 3)
