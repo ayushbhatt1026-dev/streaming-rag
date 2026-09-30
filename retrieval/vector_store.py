@@ -72,11 +72,22 @@ class QdrantVectorStore:
         self._client.upsert(collection_name=self._collection, points=points)
 
     def search(self, query_vector: np.ndarray, top_k: int) -> List[Tuple[str, float]]:
-        hits = self._client.search(
-            collection_name=self._collection,
-            query_vector=query_vector.tolist(),
-            limit=top_k,
-        )
+        # qdrant-client >=1.10 deprecated (and later versions removed)
+        # .search() in favor of .query_points(). Try the current API first,
+        # fall back to the old one so this still works on older installs.
+        try:
+            response = self._client.query_points(
+                collection_name=self._collection,
+                query=query_vector.tolist(),
+                limit=top_k,
+            )
+            hits = response.points
+        except AttributeError:
+            hits = self._client.search(
+                collection_name=self._collection,
+                query_vector=query_vector.tolist(),
+                limit=top_k,
+            )
         return [(self._id_map[h.id], float(h.score)) for h in hits]
 
 

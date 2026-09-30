@@ -18,6 +18,7 @@ Corpus isolation, enforced by construction, not just by policy:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Dict, List
 
 import numpy as np
@@ -78,7 +79,18 @@ class Retriever:
     def _search_one(self, sub_query: SubQuery) -> List[EvidenceChunk]:
         cache_key = sub_query.text.strip().lower()
         if cache_key in self._query_cache:
-            return self._query_cache[cache_key]
+            # Cache hit: the retrieval work (dense+sparse+RRF+rerank) is
+            # genuinely reusable when the query text repeats, but
+            # sub_query_id is per-call identity, not part of what makes two
+            # queries "the same." Re-stamp it on every hit via
+            # dataclasses.replace (a shallow copy) so we never mutate the
+            # cached original — without this, a second sub-query that
+            # happens to share text with an earlier one (very common here,
+            # since the controller re-decomposes as the utterance grows)
+            # silently loses its evidence downstream: the synthesizer looks
+            # up chunks by the CURRENT sub_query.id, but the cached chunks
+            # would still carry the FIRST call's id.
+            return [replace(c, sub_query_id=sub_query.id) for c in self._query_cache[cache_key]]
 
         q_vec = self._embed.encode([sub_query.text])[0]
         dense_hits = self._vector_store.search(q_vec, self.top_k_dense)

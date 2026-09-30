@@ -3,3 +3,4 @@ __pycache__/
 qdrant_data/
 .venv/
 *.egg-info/
+telemetry/*.jsonl

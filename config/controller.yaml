@@ -1,0 +1,16 @@
+# M1 Retrieval Controller — Stage 1 rule-gate thresholds.
+# Tune these against your no-retrieval test set (blueprint Phase 2, Step 5)
+# — do not hand-edit these while staring at one demo sentence, use the
+# held-out labelled set.
+
+# Minimum content words (rough non-stopword count) before we'll even
+# consider escalating to Stage 2. Below this, always WAIT.
+token_floor: 4
+
+# How many of the most recent chunks' entity-sets must be identical before
+# we consider the intent "stable" enough to escalate.
+stability_window: 2
+
+# If true, a chunk marked is_final always escalates to Stage 2 regardless
+# of the rule gate (you still need a final decision on the last chunk).
+always_escalate_on_final: true

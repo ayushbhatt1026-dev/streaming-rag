@@ -2,6 +2,8 @@
 qdrant-client>=1.9         # vector store, embedded local mode — no Docker required
 sentence-transformers>=3.0 # BGE-small-en-v1.5 embeddings
 numpy>=1.26
+pyyaml>=6.0                # config/controller.yaml, config/decomposer.yaml
+google-genai>=1.0          # Gemini — Controller Stage 2 (M1) + Decomposer (M2)
 
 # Offline dev fallback only (already covers scikit-learn's TfidfVectorizer)
 scikit-learn>=1.4

@@ -1,0 +1,8 @@
+# M2 Multi-Intent Decomposer — anti-fragmentation guard settings.
+
+# Cosine similarity above this merges two candidate sub-queries into one.
+merge_similarity_threshold: 0.90
+
+# Hard cap on sub-queries per utterance, regardless of how many the LLM
+# (or heuristic backend) proposes.
+max_sub_queries: 4
