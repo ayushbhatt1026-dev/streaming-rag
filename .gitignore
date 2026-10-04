@@ -3,4 +3,9 @@ __pycache__/
 qdrant_data/
 .venv/
 *.egg-info/
+.pytest_cache/
+*.env
+api_key_env.env
+.api_key_env
 telemetry/*.jsonl
+*.log

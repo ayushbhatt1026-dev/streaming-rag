@@ -39,8 +39,22 @@ _DANGLING_LAST_WORDS = {
 # ambiguous still gets a real decision from Stage 2, this list only ever
 # produces a SUPPRESS for very unambiguous formatting requests.
 _PRESENTATION_ONLY_RE = re.compile(
-    r"\b(repeat|again|shorter|shorten|bullet|bullets|translate|rephrase|"
-    r"reword|summariz|simpler|simplify|in two (lines|bullets|points))\b",
+    r"\b(repeat|again|shorter|shorten|bullet\w*|translate|rephrase|"
+    r"reword|simpler|simplify|in two (lines|bullets|points)|"
+    r"summari[sz]\w*\s+(that|the\s+(answer|response|explanation|last)|in\s+\w+\s+(line|bullet|point|word)s?|for\s+my\s+\w+))\b",
+    re.IGNORECASE,
+)
+
+_DOMAIN_TOPIC_RE = re.compile(
+    r"\b(venue\w*|cancellation\w*|polic\w*|catering\w*|reimburse\w*|travel\w*|"
+    r"workshop\w*|hotel\w*|flight\w*|expense\w*|surcharge\w*|capacit\w*|parking\w*|"
+    r"trip\w*|route\w*|airport\w*|employee\w*|allowance\w*|budget\w*|doc\w*|studio\w*|"
+    r"auditorium\w*|banquet\w*|suite\w*|conference\w*|meeting\w*)\b",
+    re.IGNORECASE,
+)
+
+_REFINEMENT_CUE_RE = re.compile(
+    r"\b(actually|wait|i meant|correction|instead|in that case|what if|one more thing|except|unless|turns out)\b",
     re.IGNORECASE,
 )
 
@@ -60,9 +74,12 @@ def _ends_with_dangling_connector(text: str) -> bool:
 
 
 def _entity_set(text: str) -> FrozenSet[str]:
-    # Skip the very first word of the whole utterance-so-far, since
-    # sentence-initial capitalization isn't a reliable entity signal.
-    matches = _ENTITY_HINT_RE.findall(text)
+    # Skip the very first word of the whole utterance-so-far since
+    # sentence-initial capitalization ("Is", "What", "How") is not a reliable
+    # entity signal. The comment always said this — now the code actually does it.
+    words = text.strip().split()
+    searchable = " ".join(words[1:]) if len(words) > 1 else ""
+    matches = _ENTITY_HINT_RE.findall(searchable)
     return frozenset(m.lower() for m in matches)
 
 
@@ -78,7 +95,14 @@ class RuleGate:
         """Returns a final Decision (WAIT/SUPPRESS) if the rule gate can
         decide on its own, or None to escalate to Stage 2."""
 
-        if _PRESENTATION_ONLY_RE.search(utterance_so_far):
+        has_domain_topic = bool(_DOMAIN_TOPIC_RE.search(utterance_so_far))
+
+        if not has_domain_topic and _PRESENTATION_ONLY_RE.search(utterance_so_far):
+            # If the utterance contains a refinement or correction cue,
+            # do not unconditionally suppress — escalate to Stage 2 so it can
+            # determine if this is a refinement of a prior answer.
+            if _REFINEMENT_CUE_RE.search(utterance_so_far):
+                return None
             return Decision.SUPPRESS
 
         if len(_content_words(utterance_so_far)) < self.token_floor:
@@ -88,10 +112,11 @@ class RuleGate:
         if not entities:
             return Decision.WAIT
 
+        self._entity_history.append(entities)
+
         if _ends_with_dangling_connector(utterance_so_far):
             return Decision.WAIT
 
-        self._entity_history.append(entities)
         entity_stable = (
             len(self._entity_history) == self.stability_window
             and len(set(self._entity_history)) == 1

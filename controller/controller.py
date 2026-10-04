@@ -16,11 +16,12 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 
 import yaml
 
 from contracts import ControllerDecision, Decision, TelemetryEvent, TranscriptChunk
-from controller.rule_gate import RuleGate
+from controller.rule_gate import RuleGate, _content_words
 from controller.stage2 import Stage2Confirm
 from telemetry.bus import TelemetryBus
 
@@ -37,6 +38,9 @@ class RetrievalController:
     session_id: str
     trace_id: str
     config_path: str = "config/controller.yaml"
+    # Step 7: short description of what the session's current answer is about
+    # (e.g. the prior sub-queries). None => no prior answer => REFINE can never fire.
+    prior_context: Optional[str] = None
 
     def __post_init__(self) -> None:
         cfg = _load_config(self.config_path)
@@ -45,6 +49,9 @@ class RetrievalController:
             stability_window=cfg["stability_window"],
         )
         self._always_escalate_on_final = cfg["always_escalate_on_final"]
+        # Step 7: while a session already has an answer, don't speculate mid-utterance
+        # (a provisional FULL retrieval would break the 'refine, don't restart' rule).
+        self._hold_provisional = cfg.get("hold_provisional_when_prior_answer", True)
         self._buffer_text = ""
         self._expected_final_words = 25  # rough heuristic for progress_pct; see note below
 
@@ -54,12 +61,26 @@ class RetrievalController:
         self._buffer_text = (self._buffer_text + " " + chunk.text_delta).strip()
 
         rule_result = self._rule_gate.evaluate(self._buffer_text)
-        if rule_result is not None and not (chunk.is_final and self._always_escalate_on_final):
+        should_escalate_final = (
+            chunk.is_final
+            and self._always_escalate_on_final
+            and rule_result != Decision.SUPPRESS
+            and len(_content_words(self._buffer_text)) > 0
+        )
+        if rule_result is not None and not should_escalate_final:
             decision = ControllerDecision(
                 decision=rule_result, confidence=1.0, reason="stage1_rule_gate",
             )
         else:
-            decision = self.stage2.confirm(self._buffer_text, chunk.is_final)
+            if self.prior_context:
+                decision = self.stage2.confirm(
+                    self._buffer_text, chunk.is_final, prior_context=self.prior_context
+                )
+            else:
+                decision = self.stage2.confirm(self._buffer_text, chunk.is_final)
+
+        if self.prior_context:
+            decision = self._apply_session_context(decision, chunk.is_final)
 
         latency_ms = (time.perf_counter() - start) * 1000
 
@@ -88,6 +109,31 @@ class RetrievalController:
                 },
             )
         )
+        return decision
+
+    def _apply_session_context(self, decision: ControllerDecision, is_final: bool) -> ControllerDecision:
+        """Step 7. Only runs when the session already holds an answer.
+        - refinement utterance: WAIT until final, then REFINE (never a full search)
+        - anything else: optionally hold provisional retrieval until final."""
+        if decision.decision not in (Decision.RETRIEVE_PROVISIONAL, Decision.RETRIEVE_FINAL):
+            return decision
+        if decision.is_refinement_of_prior_answer:
+            if is_final:
+                return ControllerDecision(
+                    decision=Decision.REFINE, confidence=decision.confidence,
+                    reason=f"refine: {decision.reason}",
+                    sub_intent_hint=decision.sub_intent_hint, is_refinement_of_prior_answer=True,
+                )
+            return ControllerDecision(
+                decision=Decision.WAIT, confidence=decision.confidence,
+                reason="refine_pending: waiting for the full update before patching",
+                is_refinement_of_prior_answer=True,
+            )
+        if not is_final and self._hold_provisional:
+            return ControllerDecision(
+                decision=Decision.WAIT, confidence=decision.confidence,
+                reason="hold_provisional: session already has an answer",
+            )
         return decision
 
     @property

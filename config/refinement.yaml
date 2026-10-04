@@ -1,0 +1,9 @@
+# M4 Refinement Engine settings.
+
+# How similar a new constraint must be to an existing claim before that
+# claim is even considered "touched" (candidate for the optional
+# contradiction check). Much lower than the decomposer's 0.90 merge
+# threshold -- this is "topically related," not "basically the same text."
+touch_similarity_threshold: 0.30
+
+session_ttl_seconds: 3600

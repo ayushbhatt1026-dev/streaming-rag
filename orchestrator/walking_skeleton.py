@@ -16,13 +16,28 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from contracts import Decision, EvidenceChunk, TelemetryEvent
+from contracts import AnswerVersion, ClaimStatus, Decision, EvidenceChunk, TelemetryEvent
 from controller.controller import RetrievalController
 from decomposer.decomposer import MultiIntentDecomposer
+from refinement.claim_builder import build_initial_claims
+from refinement.refinement_engine import RefinementEngine
 from retrieval.retriever import Retriever
+from session.store import SessionStore
 from simulator.transcript_simulator import simulate_utterance
 from synthesis.naive_synthesizer import NaiveSynthesizer
+from synthesis.grounded_synthesizer import GroundedSynthesizer
 from telemetry.bus import TelemetryBus
+
+
+def _format_claims(av: AnswerVersion) -> str:
+    lines = []
+    for c in av.claims:
+        if c.status != ClaimStatus.RETRACTED:
+            cites = " ".join(c.citations) if c.citations else ""
+            lines.append(f"- {c.text} {cites}".strip())
+    for u in av.uncertainties:
+        lines.append(f"- [uncertain] {u}")
+    return "\n".join(lines) if lines else "(empty answer)"
 
 
 @dataclass
@@ -35,6 +50,7 @@ class TurnResult:
     answer: str = ""
     n_retrievals_fired: int = 0
     early_retrieval: bool = False  # did retrieval start before the final chunk?
+    answer_version: Optional[AnswerVersion] = None
 
 
 def run_one_utterance(
@@ -42,12 +58,15 @@ def run_one_utterance(
     controller: RetrievalController,
     decomposer: MultiIntentDecomposer,
     retriever: Retriever,
-    synthesizer: NaiveSynthesizer,
+    synthesizer: "NaiveSynthesizer | GroundedSynthesizer",
     telemetry: TelemetryBus,
     session_id: str,
     trace_id: str,
+    session_store: Optional[SessionStore] = None,
+    refinement_engine: Optional[RefinementEngine] = None,
+    final_on_last: bool = True,
 ) -> TurnResult:
-    chunks = simulate_utterance(utterance, session_id=session_id)
+    chunks = simulate_utterance(utterance, session_id=session_id, final_on_last=final_on_last)
     result = TurnResult(trace_id=trace_id, session_id=session_id, final_decision=None)
 
     last_retrieved_sub_queries: List[str] = []
@@ -98,19 +117,63 @@ def run_one_utterance(
             )
 
             if decision.decision == Decision.RETRIEVE_FINAL:
-                answer = synthesizer.synthesize(sub_queries, evidence)
+                if isinstance(synthesizer, GroundedSynthesizer):
+                    # Step 8: synthesize_with_claims returns both text + AnswerVersion
+                    answer, av = synthesizer.synthesize_with_claims(
+                        sub_queries, evidence, version=1
+                    )
+                else:
+                    # Legacy / offline fallback
+                    answer = synthesizer.synthesize(sub_queries, evidence)
+                    av = build_initial_claims(sub_queries, evidence)
                 result.answer = answer
                 result.sub_query_texts = last_retrieved_sub_queries
                 result.evidence = all_evidence
+                result.answer_version = av
+                if session_store is not None:
+                    session_store.set(session_id, av)
 
                 telemetry.emit(
                     TelemetryEvent(
                         trace_id=trace_id, session_id=session_id, stage="synthesis",
                         event="turn_completed", t_ms=chunk.t_ms,
-                        payload={"answer_preview": answer[:200]},
+                        payload={"answer_preview": answer[:200], "version": av.version},
                     )
                 )
                 return result
+
+        elif decision.decision == Decision.REFINE:
+            # Step 7 Refinement branch: patch the prior answer without a full-corpus restart
+            prior = session_store.get(session_id) if session_store is not None else None
+            engine = refinement_engine
+            if engine is None and prior is not None:
+                embed_backend = getattr(decomposer, "embedding_backend", getattr(retriever, "_embed", None))
+                engine = RefinementEngine(
+                    decomposer=decomposer,
+                    retriever=retriever,
+                    embedding_backend=embed_backend,
+                    telemetry=telemetry,
+                    session_id=session_id,
+                    trace_id=trace_id,
+                )
+
+            if engine is not None and prior is not None:
+                new_version = engine.refine(prior, controller.utterance_so_far)
+                result.answer_version = new_version
+                result.answer = _format_claims(new_version)
+                if session_store is not None:
+                    session_store.set(session_id, new_version)
+            else:
+                result.answer = "(refined — no prior session AnswerVersion found)"
+
+            telemetry.emit(
+                TelemetryEvent(
+                    trace_id=trace_id, session_id=session_id, stage="synthesis",
+                    event="turn_completed", t_ms=chunk.t_ms,
+                    payload={"answer_preview": result.answer[:200]},
+                )
+            )
+            return result
 
         elif decision.decision == Decision.SUPPRESS:
             result.answer = "(suppressed — no retrieval fired for this turn)"
@@ -123,18 +186,28 @@ def run_one_utterance(
             )
             return result
 
-    # Reached end of chunks without a RETRIEVE_FINAL or SUPPRESS (e.g. the
-    # controller stayed provisional the whole time). Synthesize from
-    # whatever evidence we last had, so a turn never silently produces
-    # nothing.
+    # Reached end of chunks without a RETRIEVE_FINAL, REFINE, or SUPPRESS.
+    # Synthesize from whatever evidence was gathered so the turn completes.
     if last_retrieved_sub_queries:
-        result.answer = synthesizer.synthesize(
-            [sq for sq in decomposer.decompose(controller.utterance_so_far, trace_id)],
-            all_evidence,
-        )
+        sqs = [sq for sq in decomposer.decompose(controller.utterance_so_far, trace_id)]
+        if isinstance(synthesizer, GroundedSynthesizer):
+            result.answer, av = synthesizer.synthesize_with_claims(sqs, all_evidence, version=1)
+        else:
+            result.answer = synthesizer.synthesize(sqs, all_evidence)
+            av = build_initial_claims(sqs, all_evidence)
         result.sub_query_texts = last_retrieved_sub_queries
         result.evidence = all_evidence
+        result.answer_version = av
+        if session_store is not None:
+            session_store.set(session_id, av)
     else:
         result.answer = "(utterance ended without a retrieval decision — check controller tuning)"
 
+    telemetry.emit(
+        TelemetryEvent(
+            trace_id=trace_id, session_id=session_id, stage="synthesis",
+            event="turn_completed", t_ms=chunks[-1].t_ms if chunks else 0.0,
+            payload={"answer_preview": result.answer[:200]},
+        )
+    )
     return result

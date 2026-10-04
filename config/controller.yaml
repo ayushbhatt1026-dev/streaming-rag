@@ -14,3 +14,11 @@ stability_window: 2
 # If true, a chunk marked is_final always escalates to Stage 2 regardless
 # of the rule gate (you still need a final decision on the last chunk).
 always_escalate_on_final: true
+
+# When a session already holds an AnswerVersion, should provisional
+# retrievals be held until the utterance is final? Setting this to true
+# prevents a mid-utterance RETRIEVE_PROVISIONAL from firing a full-corpus
+# search and overwriting the session answer before we know if the user
+# is refining or asking a brand-new question. Set false if you want
+# early-retrieval even in multi-turn sessions (lower G2 on refinement turns).
+hold_provisional_when_prior_answer: true

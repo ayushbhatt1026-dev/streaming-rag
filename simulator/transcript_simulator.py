@@ -26,9 +26,11 @@ def simulate_utterance(
     session_id: str,
     words_per_chunk: int = WORDS_PER_CHUNK,
     seed: int | None = 42,
+    final_on_last: bool = True,
 ) -> List[TranscriptChunk]:
     """Deterministic by default (seed=42) so replays are reproducible for
-    testing. Pass seed=None for non-deterministic jitter."""
+    testing. Pass seed=None for non-deterministic jitter. Set final_on_last=False
+    for trailing-off speech where no final end-of-utterance signal is emitted."""
     rng = random.Random(seed)
     words = text.strip().split()
     chunks: List[TranscriptChunk] = []
@@ -36,7 +38,7 @@ def simulate_utterance(
 
     for i in range(0, len(words), words_per_chunk):
         delta = " ".join(words[i : i + words_per_chunk])
-        is_final = (i + words_per_chunk) >= len(words)
+        is_final = final_on_last and ((i + words_per_chunk) >= len(words))
         t_ms += STEP_MS + rng.uniform(-JITTER_MS, JITTER_MS)
         chunks.append(
             TranscriptChunk(

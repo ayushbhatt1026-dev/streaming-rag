@@ -9,7 +9,7 @@ of which backend produced the candidates.
 from __future__ import annotations
 
 import re
-from typing import List, Protocol
+from typing import List, Optional, Protocol
 
 from llm.gemini_client import GeminiLLMClient
 
@@ -19,8 +19,11 @@ non-overlapping search queries for a retrieval system.
 Rules:
 - If the utterance has exactly one intent, return exactly one sub-query — do not pad.
 - Each sub-query must be self-contained: resolve pronouns and carry forward topic
-  context (e.g. "the cancellation policy" -> "cancellation and refund policy for
-  workshop venues in Pune", if Pune was mentioned earlier in the utterance).
+  context (e.g. "I'm booking Venue B. What is the cancellation policy and does it have parking?" ->
+  "cancellation and refund policy for Venue B", "parking availability for Venue B Skyline Conference Center").
+- Speech repairs / conversational corrections: if the user corrects themselves mid-sentence
+  (e.g. "Book a venue in Pune... actually Mumbai for 30 people" or "Venue A... wait Venue B"),
+  use ONLY the final corrected entity/constraint ("Mumbai", "Venue B") and discard the retracted one ("Pune", "Venue A").
 - Tag each with an intent_type: factual_lookup, policy, constraint, or comparison.
 - Return at most 4 sub-queries.
 
@@ -30,6 +33,58 @@ Respond ONLY with JSON: {"sub_queries": [{"text": "...", "intent_type": "..."}]}
 
 class DecomposeBackend(Protocol):
     def propose(self, utterance: str) -> List[dict]: ...
+
+
+class GroqDecomposeBackend:
+    """Production Decomposer powered by Groq (openai/gpt-oss-20b)."""
+
+    def __init__(self, client: Optional[object] = None) -> None:
+        if client is None:
+            from llm.groq_client import GroqLLMClient
+            self._client = GroqLLMClient()
+        else:
+            self._client = client
+
+    def propose(self, utterance: str) -> List[dict]:
+        try:
+            data = self._client.complete_json(_SYSTEM_PROMPT, f"Utterance: \"{utterance}\"")
+            sub_queries = data.get("sub_queries", [])
+            if not sub_queries:
+                return [{"text": utterance, "intent_type": "factual_lookup"}]
+            return sub_queries
+        except ValueError:
+            return [{"text": utterance, "intent_type": "factual_lookup"}]
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print(f"[decomposer] Groq LLM unavailable ({type(e).__name__}); using heuristic fallback")
+            return HeuristicDecomposeBackend().propose(utterance)
+
+
+class OpenAIDecomposeBackend:
+    """Production Decomposer powered by OpenAI (gpt-4o-mini)."""
+
+    def __init__(self, client: Optional[object] = None) -> None:
+        if client is None:
+            from llm.openai_client import OpenAILLMClient
+            self._client = OpenAILLMClient()
+        else:
+            self._client = client
+
+    def propose(self, utterance: str) -> List[dict]:
+        try:
+            data = self._client.complete_json(_SYSTEM_PROMPT, f"Utterance: \"{utterance}\"")
+            sub_queries = data.get("sub_queries", [])
+            if not sub_queries:
+                return [{"text": utterance, "intent_type": "factual_lookup"}]
+            return sub_queries
+        except ValueError:
+            return [{"text": utterance, "intent_type": "factual_lookup"}]
+        except RuntimeError:
+            raise
+        except Exception as e:
+            print(f"[decomposer] OpenAI LLM unavailable ({type(e).__name__}); using heuristic fallback")
+            return HeuristicDecomposeBackend().propose(utterance)
 
 
 class GeminiDecomposeBackend:
@@ -47,6 +102,13 @@ class GeminiDecomposeBackend:
             # Fail safe: if the model didn't return valid JSON, treat the
             # whole utterance as one intent rather than dropping the turn.
             return [{"text": utterance, "intent_type": "factual_lookup"}]
+        except RuntimeError:
+            raise  # bad key/config: surface loudly, don't hide it
+        except Exception as e:
+            # Transient LLM outage/quota after retries: degrade to the
+            # offline heuristic so the turn still completes.
+            print(f"[decomposer] LLM unavailable ({type(e).__name__}); using heuristic fallback")
+            return HeuristicDecomposeBackend().propose(utterance)
 
 
 class HeuristicDecomposeBackend:

@@ -52,6 +52,10 @@ class Retriever:
         self._chunks_by_id: Dict[str, EvidenceChunk] = {}
         self._chunk_vectors: Dict[str, np.ndarray] = {}
         self._query_cache: Dict[str, List[EvidenceChunk]] = {}
+        self.query_log: List[dict] = []
+
+    def clear_query_log(self) -> None:
+        self.query_log.clear()
 
     def index_corpus(self, corpus_dir: str = "corpus") -> int:
         """Chunk every document, embed once, and build both indexes.
@@ -90,7 +94,14 @@ class Retriever:
             # silently loses its evidence downstream: the synthesizer looks
             # up chunks by the CURRENT sub_query.id, but the cached chunks
             # would still carry the FIRST call's id.
-            return [replace(c, sub_query_id=sub_query.id) for c in self._query_cache[cache_key]]
+            hits = [replace(c, sub_query_id=sub_query.id) for c in self._query_cache[cache_key]]
+            self.query_log.append({
+                "sub_query": sub_query.text,
+                "sub_query_id": sub_query.id,
+                "cache_hit": True,
+                "n_results": len(hits),
+            })
+            return hits
 
         q_vec = self._embed.encode([sub_query.text])[0]
         dense_hits = self._vector_store.search(q_vec, self.top_k_dense)
@@ -122,6 +133,12 @@ class Retriever:
         result_chunks = result_chunks[: self.top_k_final]
 
         self._query_cache[cache_key] = result_chunks
+        self.query_log.append({
+            "sub_query": sub_query.text,
+            "sub_query_id": sub_query.id,
+            "cache_hit": False,
+            "n_results": len(result_chunks),
+        })
         return result_chunks
 
     def search(self, sub_queries: List[SubQuery]) -> List[EvidenceChunk]:
