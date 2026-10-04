@@ -7,6 +7,8 @@ Real-Time Incremental Retrieval, Multi-Intent Decomposition, and State-Preservin
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Gate Scorecard: 100% PASS](https://img.shields.io/badge/Scorecard-100%25%20PASS-brightgreen.svg)](docs/benchmarking_report.md)
 
+DEMO Video : https://drive.google.com/file/d/1yaAHiJ2yJ5CDpkUIMHp2NWVsBNPywo2F/view?usp=drivesdk
+
 ---
 
 ## 1. Overview & Architecture
